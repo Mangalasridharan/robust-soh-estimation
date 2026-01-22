@@ -1,0 +1,20 @@
+# Models
+models/
+*.keras
+*.h5
+*.pt
+*.pth
+
+# Results / outputs
+results/
+*.png
+*.jpg
+*.jpeg
+
+# Dataset / csv files
+Dataset/
+*.csv
+
+# Notebook junk
+.ipynb_checkpoints/
+__pycache__/
