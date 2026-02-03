@@ -18,3 +18,6 @@ Dataset/
 # Notebook junk
 .ipynb_checkpoints/
 __pycache__/
+
+#Pickle files 
+*.pkl
