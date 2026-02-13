@@ -21,3 +21,6 @@ __pycache__/
 
 #Pickle files 
 *.pkl
+
+#IDE files
+.vscode
