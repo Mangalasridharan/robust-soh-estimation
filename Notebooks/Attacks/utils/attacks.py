@@ -67,49 +67,53 @@ def fgsm_attack_batch(model, x_ic, x_ctx, y, scaler_std, epsilon_physical, clip_
     
     return x_adv
 
+@tf.function
+def pgd_attack_batch(model, x_ic, x_ctx, y, scaler_std,
+                     alpha_physical, epsilon_physical,
+                     num_iter, clip_min, clip_max):
 
-def pgd_attack(model, x_ic_batch, x_ctx_batch, y_batch,
-                   epsilon, alpha, num_iter,
-                   clip_min, clip_max):
-    """
-    GPU-optimized PGD attack (iterative FGSM with projection)
-    
-    Args:
-        epsilon: Maximum perturbation (L∞ ball radius)
-        alpha: Step size per iteration
-        num_iter: Number of iterations
-    """
-    # Ensure tensors
-    x_ic_batch = tf.convert_to_tensor(x_ic_batch, dtype=tf.float32)
-    x_ctx_batch = tf.convert_to_tensor(x_ctx_batch, dtype=tf.float32)
-    y_batch = tf.convert_to_tensor(y_batch, dtype=tf.float32)
-    
-    # Initialize adversarial examples
-    x_ic_adv = tf.Variable(x_ic_batch, dtype=tf.float32)
-    x_ic_orig = x_ic_batch
-    
-    for i in range(num_iter):
+    x_ic = tf.cast(x_ic, tf.float32)
+    x_ctx = tf.cast(x_ctx, tf.float32)
+    y    = tf.cast(y, tf.float32)
+    clip_min = tf.cast(clip_min, tf.float32)
+    clip_max = tf.cast(clip_max, tf.float32)
+
+    x_ic_adv = x_ic
+    x_ic_orig = x_ic
+
+    # ---------- scaler reshape ----------
+    scaler_std_tensor = tf.cast(tf.convert_to_tensor(scaler_std), tf.float32)
+    x_rank = tf.rank(x_ic)
+    tail_ones = tf.ones((x_rank - 2,), dtype=tf.int32)
+    scaler_shape = tf.concat(([1, tf.shape(scaler_std_tensor)[0]], tail_ones), axis=0)
+    scaler_std_tensor = tf.reshape(scaler_std_tensor, scaler_shape)
+
+    epsilon_scaled = tf.cast(epsilon_physical, tf.float32) / scaler_std_tensor
+    alpha_scaled   = tf.cast(alpha_physical,   tf.float32) / scaler_std_tensor
+
+    # ---------- PGD iterations ----------
+    for _ in tf.range(num_iter):
+
         with tf.GradientTape() as tape:
             tape.watch(x_ic_adv)
-            predictions = model([x_ic_adv, x_ctx_batch], training=False)
-            loss = tf.reduce_mean(tf.square(y_batch - predictions))
-        
-        gradient = tape.gradient(loss, x_ic_adv)
-        
-        # Update: x = x + alpha * sign(gradient)
-        x_ic_adv.assign_add(alpha * tf.sign(gradient))
-        
-        # Project back to epsilon ball around original
-        perturbation = x_ic_adv - x_ic_orig
-        perturbation = tf.clip_by_value(perturbation, -epsilon, epsilon)
-        x_ic_adv.assign(x_ic_orig + perturbation)
-        
-        # Clip to valid range
-        x_ic_adv.assign(tf.clip_by_value(x_ic_adv, clip_min, clip_max))
-    
-    return x_ic_adv.read_value()
+            pred = model([x_ic_adv, x_ctx], training=False)
+            loss = tf.reduce_mean(tf.square(y - pred))
 
-import tensorflow as tf
+        grad = tape.gradient(loss, x_ic_adv)
+        grad = tf.where(tf.math.is_finite(grad), grad, tf.zeros_like(x_ic_adv))
+
+        # gradient step
+        x_ic_adv = x_ic_adv + alpha_scaled * tf.sign(grad)
+
+        # projection to epsilon ball
+        perturbation = tf.clip_by_value(x_ic_adv - x_ic_orig,
+                                        -epsilon_scaled, epsilon_scaled)
+        x_ic_adv = x_ic_orig + perturbation
+
+        # physical clipping
+        x_ic_adv = tf.clip_by_value(x_ic_adv, clip_min, clip_max)
+
+    return x_ic_adv
 
 
 @tf.function  # enables graph mode + GPU acceleration
@@ -138,6 +142,8 @@ def jsma_regression_attack_gpu(
     x_ic = tf.convert_to_tensor(x_ic_batch, tf.float32)
     x_ctx = tf.convert_to_tensor(x_ctx_batch, tf.float32)
     y_true = tf.convert_to_tensor(y_batch, tf.float32)
+    clip_min = tf.cast(clip_min, tf.float32)
+    clip_max = tf.cast(clip_max, tf.float32)
 
     # Adversarial variable
     x_adv = tf.Variable(x_ic)
@@ -221,6 +227,8 @@ def cw_attack(
     x_ic = tf.cast(x_ic, tf.float32)
     x_ctx = tf.cast(x_ctx, tf.float32)
     y = tf.cast(y, tf.float32)
+    clip_min = tf.cast(clip_min, tf.float32)
+    clip_max = tf.cast(clip_max, tf.float32)
 
     # -------------------------------------------------
     # Step 1: Normalize input to [0, 1] for tanh trick
