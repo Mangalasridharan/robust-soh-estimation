@@ -19,10 +19,19 @@ def fgsm_attack_batch(model, x_ic, x_ctx, y, scaler_std, epsilon_physical, clip_
     Returns:
         Adversarial IC curves - shape: (batch_size, 20)
     """
-    # Cast inputs
+    # Cast inputs (use tf.cast so float64 tensors are accepted)
     x_ic = tf.cast(x_ic, tf.float32)
     x_ctx = tf.cast(x_ctx, tf.float32)
     y = tf.cast(y, tf.float32)
+    clip_min = tf.cast(clip_min, tf.float32)
+    clip_max = tf.cast(clip_max, tf.float32)
+
+    # Reshape scaler_std to broadcast over input rank: (1, F, 1, ..., 1)
+    scaler_std_tensor = tf.cast(tf.convert_to_tensor(scaler_std), tf.float32)
+    x_rank = tf.rank(x_ic)
+    tail_ones = tf.ones((x_rank - 2,), dtype=tf.int32)
+    scaler_shape = tf.concat(([1, tf.shape(scaler_std_tensor)[0]], tail_ones), axis=0)
+    scaler_std_tensor = tf.reshape(scaler_std_tensor, scaler_shape)
     
     # Track gradient
     with tf.GradientTape() as tape:
@@ -38,17 +47,7 @@ def fgsm_attack_batch(model, x_ic, x_ctx, y, scaler_std, epsilon_physical, clip_
     if grad is None:
         tf.print("WARNING: Gradient is None. Check model connections.")
         return x_ic
-    
-    # Convert scaler_std to tensor and reshape for broadcasting against x_ic rank.
-    # Example:
-    # x_ic (B, F)    -> scaler (1, F)
-    # x_ic (B, F, 1) -> scaler (1, F, 1)
-    scaler_std_tensor = tf.cast(tf.convert_to_tensor(scaler_std), tf.float32)
-    x_rank = tf.rank(x_ic)
-    tail_ones = tf.ones((x_rank - 2,), dtype=tf.int32)
-    scaler_shape = tf.concat(([1, tf.shape(scaler_std_tensor)[0]], tail_ones), axis=0)
-    scaler_std_tensor = tf.reshape(scaler_std_tensor, scaler_shape)
-    
+        
     # Calculate scaled epsilon for each feature
     # epsilon_physical / scaler_std_tensor gives shape: (1, 20)
     epsilon_physical = tf.cast(epsilon_physical, tf.float32)
@@ -61,8 +60,6 @@ def fgsm_attack_batch(model, x_ic, x_ctx, y, scaler_std, epsilon_physical, clip_
     x_adv = x_ic + perturbation
     
     # Clip to valid range
-    clip_min = tf.cast(clip_min, tf.float32)
-    clip_max = tf.cast(clip_max, tf.float32)
     x_adv = tf.clip_by_value(x_adv, clip_min, clip_max)
     
     return x_adv
@@ -114,6 +111,45 @@ def pgd_attack_batch(model, x_ic, x_ctx, y, scaler_std,
         x_ic_adv = tf.clip_by_value(x_ic_adv, clip_min, clip_max)
 
     return x_ic_adv
+
+def cw_regression_attack(
+    model, x_ic, x_ctx, y_true,
+    c=100.0, lr=0.02, steps=300,
+    clip_min=-3.0, clip_max=3.0
+):
+    x_ic = tf.cast(x_ic, tf.float32)
+    x_ctx = tf.cast(x_ctx, tf.float32)
+    y_true = tf.cast(y_true, tf.float32)
+
+    if tf.rank(y_true) == 1:
+        y_true = tf.expand_dims(y_true, -1)
+
+    z = tf.Variable(tf.zeros_like(x_ic), trainable=True)
+    optimizer = tf.keras.optimizers.Adam(lr)
+
+    half_range = (clip_max - clip_min) / 2.0
+    mid = (clip_max + clip_min) / 2.0
+    axes = tf.range(1, tf.rank(x_ic))
+
+    for _ in range(steps):
+        with tf.GradientTape() as tape:
+            x_adv = tf.tanh(z) * half_range + mid
+            y_adv = model([x_adv, x_ctx], training=False)
+
+            # squared L2
+            l2 = tf.reduce_mean(tf.reduce_sum(tf.square(x_adv - x_ic), axis=axes))
+
+            # regression CW objective (maximize error)
+            f = tf.square(y_true - y_adv)
+
+            loss = l2 - c * tf.reduce_mean(f)
+
+        grads = tape.gradient(loss, z)
+        grads = tf.where(tf.math.is_finite(grads), grads, tf.zeros_like(grads))
+        optimizer.apply_gradients([(grads, z)])
+
+    x_final = tf.tanh(z) * half_range + mid
+    return x_final
 
 
 @tf.function  # enables graph mode + GPU acceleration
